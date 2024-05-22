@@ -11,6 +11,8 @@ struct RasterizerData {
     // returned from the vertex function.
     float4 position [[position]];
 
+    float point_size [[point_size]];
+
     // Since this member does not have a special attribute, the rasterizer
     // interpolates its value with the values of the other triangle vertices
     // and then passes the interpolated value to the fragment shader for each
@@ -30,12 +32,14 @@ vertex RasterizerData vertex_shader(uint vertex_ID [[vertex_id]], constant Verte
     vector_float2 viewport_size = vector_float2(*viewport_size_pointer);
     
     // To convert from positions in pixel space to positions in clip-space,
-    //  divide the pixel coordinates by half the size of the viewport.
-    out.position = vector_float4(0.0, 0.0, 0.0, 1.0);
+    // divide the pixel coordinates by half the size of the viewport.
+    // out.position = vector_float4(0.0, 0.0, 0.0, 1.0);
     out.position.xy = pixel_space_position / (viewport_size / 2.0);
 
     // Pass the input color directly to the rasterizer.
     out.color = vertices[vertex_ID].color;
+
+    out.point_size = 10.0;
 
     return out;
 }
@@ -43,4 +47,3 @@ vertex RasterizerData vertex_shader(uint vertex_ID [[vertex_id]], constant Verte
 fragment float4 fragment_shader(RasterizerData in [[stage_in]]) {
     return in.color;
 }
-
