@@ -1,12 +1,16 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <mach/mach_init.h>
 #include <mach/mach_time.h>
 #include <simd/simd.h>
+#import <dispatch/dispatch.h>
 
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 #import <Cocoa/Cocoa.h>
 #import "shaders.h"
+
+#import "font.h"
 
 typedef struct {
     uint64_t block_size;
@@ -15,30 +19,59 @@ typedef struct {
 } Memory;
 
 typedef struct {
-    int offset_x;
-    int offset_y;
+    double offset_x;
+    double offset_y;
 } AppState;
+
+typedef struct {
+    Vertex *vertices;
+    u_int32_t drawn_frame_vertices;
+} FrameBuffer;
+
+typedef struct {
+    u_int32_t current_frame_buffer_index;
+    FrameBuffer frame_buffers[3];
+} TripleBuffering;
 
 int running = 1;
 int frames_missed = 0;
 
-int update(Memory *memory, Vertex *buffer) {
+int update(Memory *memory, FrameBuffer *buffer, double delta) {
+    double speed = 0.05;
+    double movement_delta = speed * delta;
+
     AppState *app_state = (AppState *)memory->block;
 
     if (!(memory->is_initialised)) {
         app_state->offset_x = 0;
         app_state->offset_y = 0;
         memory->is_initialised = true;
+
+        // FONT RENDERING
+        // https://handmade.network/forums/articles/t/7330-implementing_a_font_reader_and_rasterizer_from_scratch%252C_part_1__ttf_font_reader
+        // https://www.youtube.com/watch?v=SO83KQuuZvg&t=1349s
+    	int file_size = 0;
+    	char* file = read_file("/Users/roysalazar/repositories/projects/macos-app/src/JetBrainsMono-Regular.ttf", &file_size);
+    	char* mem_ptr = file;
+
+    	font_directory ft = {0};
+    	read_font_directory(file, &mem_ptr, &ft);
+
+    	glyph_outline A = get_glyph_outline(&ft, get_glyph_index(&ft, 'A'));
+    	print_glyph_outline(&A);
     }
 
-    buffer[0].position = (vector_float2){ 0, 0};
-    buffer[0].color = (vector_float4){1.0, 0.0, 0.0, 1.0}; // Red
+    u_int32_t drawn_vertices = 0;
 
-    buffer[1].position = (vector_float2){ 100.0, 100.0};
-    buffer[1].color = (vector_float4){1.0, 0.0, 0.0, 1.0}; // Red
+    Vertex v1 = { { 0, 0}, {1.0f, 0.0f, 0.0f, 1.0f} };
+    buffer->vertices[drawn_vertices++] = v1;
 
-    app_state->offset_x++;
-    app_state->offset_y++;
+    Vertex v2 = { { 100.0f+(float)app_state->offset_x, 100.0f+(float)app_state->offset_y}, {1.0f, 0.0f, 0.0f, 1.0f} };
+    buffer->vertices[drawn_vertices++] = v2;
+
+    buffer->drawn_frame_vertices = drawn_vertices;
+
+    app_state->offset_x = app_state->offset_x + movement_delta;
 
     return 0;
 }
@@ -117,7 +150,8 @@ int update_refresh_rate(float *current_display_refresh_rate, int display_id) {
 int main() {
     int retval = 0;
     NSError *error = NULL;
-    
+    NSMutableString *err_message = [NSMutableString string];
+
     NSRect screen = [[NSScreen mainScreen] frame];
 
     CGFloat window_width = 1024;
@@ -134,9 +168,8 @@ int main() {
                                                        defer:NO];
 
     if (window == NULL) {
-        NSLog(@"Failed to initialize window");
-        retval = -1;
-        goto window_cleanup;
+        [err_message appendString:@"Failed to initialize window"];
+        goto error_on_initialization;
     }
 
     [window makeKeyAndOrderFront:nil];          // needed to display the window
@@ -144,9 +177,8 @@ int main() {
     
     CAMetalLayer *metal_layer = [CAMetalLayer layer];
     if (metal_layer == NULL) {
-        NSLog(@"Failed to initialize layer object");
-        retval = -1;
-        goto metal_layer_cleanup;
+        [err_message appendString:@"Failed to initialize layer object"];
+        goto error_on_initialization;
     }
     
     window.contentView.wantsLayer = YES;
@@ -158,37 +190,32 @@ int main() {
 
     NSURL *shader_url = [[NSBundle mainBundle] URLForResource:@"shaders" withExtension:@"metallib"];
     if (shader_url == NULL) {
-        NSLog(@"Failed to locate shader file");
-        retval = -1;
-        goto shader_url_cleanup;
+        [err_message appendString:@"Failed to locate shader file"];
+        goto error_on_initialization;
     }
 
     id<MTLLibrary> shaders_library = [metal_layer.device newLibraryWithURL:shader_url error:&error];
     if (shaders_library == NULL) {
-        NSLog(@"Failed to load Metal library file: %@", error);
-        retval = -1;
-        goto shader_url_cleanup;
+        [err_message appendString:@"Failed to load Metal library file"];
+        goto error_on_initialization;
     }
 
     id<MTLFunction> vertex_shader = [shaders_library newFunctionWithName:@"vertex_shader"];
-    if (vertex_shader == NULL) {
-        NSLog(@"Failed to find function in the library: %@", error);
-        retval = -1;
-        goto shader_url_cleanup;
+    if (vertex_shader == NULL) {        
+        [err_message appendString:@"Failed to find vertex shader function in the library"];
+        goto error_on_initialization;
     }
 
     id<MTLFunction> fragment_shader = [shaders_library newFunctionWithName:@"fragment_shader"];
     if (fragment_shader == NULL) {
-        NSLog(@"Failed to find function in the library: %@", error);
-        retval = -1;
-        goto shader_url_cleanup;
+        [err_message appendString:@"Failed to find fragment shader function in the library"];
+        goto error_on_initialization;
     }
 
     MTLRenderPipelineDescriptor *pipeline_descriptor = [[MTLRenderPipelineDescriptor alloc] init];
     if (pipeline_descriptor == NULL) {
-        NSLog(@"Failed to initiate pipeline descriptor");
-        retval = -1;
-        goto pipeline_descriptor_cleanup;
+        [err_message appendString:@"Failed to initiate pipeline descriptor"];
+        goto error_on_initialization;
     }
 
     pipeline_descriptor.vertexFunction = vertex_shader;
@@ -197,30 +224,24 @@ int main() {
 
     id<MTLRenderPipelineState> pipeline_state = [metal_layer.device newRenderPipelineStateWithDescriptor:pipeline_descriptor error:&error];
     if (pipeline_state == NULL || error != NULL) {
-        NSLog(@"Failed to create pipeline state: %@", error);
-        retval = -1;
-        goto pipeline_descriptor_cleanup;
+        [err_message appendString:@"Failed to create pipeline state"];
+        goto error_on_initialization;
     }
     
     id<MTLCommandQueue> command_queue = [metal_layer.device newCommandQueue];
     if (command_queue == NULL) {
-        NSLog(@"Failed to create new command queue instance");
-        retval = -1;
-        goto pipeline_descriptor_cleanup;
+        [err_message appendString:@"Failed to create new command queue instance"];
+        goto error_on_initialization;
     }
 
-    Memory memory;
+    Memory memory = {};
 
     memory.block_size = 5000;
     memory.block = mmap(0, memory.block_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (memory.block == MAP_FAILED) {
-        NSLog(@"Failed to allocate memory for memory.block");
-        retval = -1;
-        goto pipeline_descriptor_cleanup;
+        [err_message appendString:@"Failed to allocate memory for memory.block"];
+        goto error_on_initialization;
     }
-
-    // TODO: 
-    //  - Double buffer
 
     mach_timebase_info_data_t time_base;
     mach_timebase_info(&time_base);
@@ -228,7 +249,31 @@ int main() {
     float current_display_refresh_rate;
     uint32_t display_count;
 
-    Vertex buffer[2];
+    static const NSUInteger max_buffers = 3;
+
+    dispatch_semaphore_t frame_boundary_semaphore = dispatch_semaphore_create(max_buffers);
+    u_int32_t buffer_index = 0;
+
+    TripleBuffering triple_buffering = {};
+
+    u_int32_t page_size = getpagesize();
+    u_int32_t vertex_buffer_size = page_size * 1000;
+
+    id<MTLBuffer> vertex_buffers[3];
+
+    for(int i = 0; i < max_buffers; i++) {
+        FrameBuffer frame_buffer = {};
+        frame_buffer.vertices = (Vertex *)mmap(0, vertex_buffer_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        
+        triple_buffering.frame_buffers[i] = frame_buffer;
+
+        id<MTLBuffer> metal_vertex_buffer = [metal_layer.device newBufferWithBytesNoCopy:frame_buffer.vertices
+                                                                                  length:vertex_buffer_size
+                                                                                 options:MTLResourceStorageModeShared
+                                                                             deallocator:nil];
+
+        vertex_buffers[i] = metal_vertex_buffer;
+    }
 
     uint64_t begin_frame = mach_absolute_time();
 
@@ -274,17 +319,24 @@ int main() {
 
         // TODO: if window moves, check whether it moved to another display, if so, update current_display_refresh_rate
 
+        dispatch_semaphore_wait(frame_boundary_semaphore, DISPATCH_TIME_FOREVER);
+
         vector_uint2 viewport_size;
 
         viewport_size.x = metal_layer.frame.size.width;
         viewport_size.y = metal_layer.frame.size.height;
         
-        update(&memory, buffer);
+        FrameBuffer *frame_buffer = &triple_buffering.frame_buffers[buffer_index];
+        
+        double delta = (1.0 / (double)current_display_refresh_rate) * (double)1000.0;
+        
+        frame_buffer->drawn_frame_vertices = 0;
+        update(&memory, frame_buffer, delta);
 
+        // TODO: Cleanup and commit!
+        // TODO: Implement layering maybe using z-buffer or ray casting
+ 
         @autoreleasepool {
-            id<MTLBuffer> vertexBuffer = [metal_layer.device newBufferWithBytes:buffer
-                                                                         length:sizeof(buffer)
-                                                                        options:MTLResourceStorageModeShared];
             id<MTLCommandBuffer> command_buffer = [command_queue commandBuffer];
 
             id<CAMetalDrawable> next_drawable = [metal_layer nextDrawable];
@@ -302,25 +354,34 @@ int main() {
                 [render_encoder setViewport:(MTLViewport){0.0, 0.0, viewport_size.x, viewport_size.y, 0.0, 1.0 }];
                 
                 [render_encoder setRenderPipelineState:pipeline_state];
-
-                [render_encoder setVertexBuffer:vertexBuffer
+                
+                [render_encoder setVertexBuffer:vertex_buffers[buffer_index]
                                          offset:0
-                                        atIndex:VertexInputIndexVertices];
+                                        atIndex:VertexInputIndexVertices]; 
                 
                 [render_encoder setVertexBytes:&viewport_size
                                         length:sizeof(viewport_size)
                                        atIndex:VertexInputIndexViewportSize];
 
-                int vertices_size = sizeof(buffer) / sizeof(buffer[0]);
-
                 // Draw the triangle.
                 [render_encoder drawPrimitives:MTLPrimitiveTypePoint
                                    vertexStart:0
-                                   vertexCount:vertices_size];
+                                   vertexCount:frame_buffer->drawn_frame_vertices];
 
                 [render_encoder endEncoding];
 
                 [command_buffer presentDrawable: next_drawable];
+
+                buffer_index++;
+                if (buffer_index > 2) {
+                    buffer_index = 0;
+                }
+                
+                __block dispatch_semaphore_t semaphore = frame_boundary_semaphore;
+
+                [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> command_buffer) {
+                    dispatch_semaphore_signal(semaphore);
+                }];
             }
 
             float target_seconds_per_frame = 1.0f / current_display_refresh_rate; 
@@ -374,19 +435,15 @@ int main() {
         };
     }
 
-pipeline_descriptor_cleanup:
-    [pipeline_descriptor release];
+error_on_initialization:
+    printf("error on initialization\n");
+    retval = -1;
 
-shader_url_cleanup:
-    [shader_url release];
-
-metal_layer_cleanup:
-    [metal_layer release];
-
-window_cleanup:
-    [window release];
-
-    NSLog(@"Frames missed: %d", frames_missed);
-
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleCritical;
+    alert.messageText = err_message;
+    alert.informativeText = err_message;
+    [alert runModal];
+    
     return retval;
 }

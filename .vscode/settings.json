@@ -1,0 +1,5 @@
+{
+  "editor.tabSize": 4,
+  "terminal.integrated.defaultProfile.linux": "zsh",
+  "explorer.compactFolders": false
+}
